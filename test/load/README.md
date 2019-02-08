@@ -6,7 +6,7 @@ Load tests aim to test the performance of the system under heavy load. Game serv
 
 Prerequisites:
 - Docker.
-- a running k8s cluster (kube config is passed as arguments).
+- A running k8s cluster.
 - Have kubeconfig file ready.
 
 Load tests are written using Locust. These tests are also integrated with Graphite and Grafana
