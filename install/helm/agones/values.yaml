@@ -16,22 +16,41 @@
 
 agones:
   metrics:
-    enabled: true
+    prometheusEnabled: true
     prometheusServiceDiscovery: true
+    stackdriverEnabled: false
+    stackdriverProjectID: ""
   rbacEnabled: true
+  registerServiceAccounts: true
+  registerWebhooks: true
   crds:
     install: true
     cleanupOnDelete: true
   serviceaccount:
     controller: agones-controller
     sdk: agones-sdk
+  priorityClassName: agones-system
   controller:
     resources: {}
     nodeSelector: {}
-    tolerations: []
-    affinity: {}
+    tolerations:
+    - key: "stable.agones.dev/agones-system"
+      operator: "Equal"
+      value: "true"
+      effect: "NoExecute"
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: stable.agones.dev/agones-system
+                operator: Exists
     generateTLS: true
     safeToEvict: false
+    numWorkers: 100
+    apiServerQPS: 400
+    apiServerQPSBurst: 500
     http:
       port: 8080
     healthCheck:
@@ -43,8 +62,19 @@ agones:
     install: true
     resources: {}
     nodeSelector: {}
-    tolerations: []
-    affinity: {}
+    tolerations:
+    - key: "stable.agones.dev/agones-system"
+      operator: "Equal"
+      value: "true"
+      effect: "NoExecute"
+    affinity:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 1
+          preference:
+            matchExpressions:
+              - key: stable.agones.dev/agones-system
+                operator: Exists
     replicas: 2
     http:
       expose: true
@@ -80,4 +110,5 @@ gameservers:
   namespaces:
   - default
   minPort: 7000
-  maxPort: 8000 
+  maxPort: 8000
+

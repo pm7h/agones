@@ -19,7 +19,8 @@
 FROM gcr.io/agones-images/grpc-cxx:1.16.1
 
 RUN apt-get update && \
-    apt-get install -y wget psmisc rsync make python bash-completion zip nano jq graphviz && \
+    apt-get install -y wget psmisc rsync make python bash-completion zip nano jq graphviz linkchecker \
+            gettext-base plantuml && \
     apt-get clean
 
 #   _
@@ -47,7 +48,7 @@ RUN wget -q https://static.rust-lang.org/rustup/archive/1.11.0/${RUST_ARCH}/rust
 
 # install go
 WORKDIR /usr/local
-ENV GO_VERSION=1.11.4
+ENV GO_VERSION=1.11.5
 ENV GOPATH /go
 RUN wget -q https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz && \
     tar -xzf go${GO_VERSION}.linux-amd64.tar.gz && rm go${GO_VERSION}.linux-amd64.tar.gz && mkdir ${GOPATH}
@@ -62,7 +63,7 @@ RUN wget -q https://dl.google.com/dl/cloudsdk/release/google-cloud-sdk.zip && un
 ENV PATH /usr/local/go/bin:/go/bin:/opt/google-cloud-sdk/bin:$PATH
 
 # RUN gcloud components update
-RUN gcloud components update
+RUN gcloud components update && gcloud components install app-engine-go
 
 # overwrite kubectl as we want a specific version
 ENV KUBECTL_VER 1.11.5
@@ -108,6 +109,22 @@ RUN curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.s
 # install the release branch of the code generator tools
 RUN mkdir -p /go/src && cd /go/src && mkdir -p k8s.io && cd k8s.io && \
     git clone -b kubernetes-1.11.5 --depth=3 https://github.com/kubernetes/code-generator.git
+
+#
+#  \ \      / /__| |__  ___(_) |_ ___
+#   \ \ /\ / / _ \ '_ \/ __| | __/ _ \
+#    \ V  V /  __/ |_) \__ \ | |_  __/
+#     \_/\_/ \___|_.__/|___/_|\__\___|
+#
+
+RUN mkdir /tmp/hugo && \
+    wget -O /tmp/hugo/hugo.tar.gz https://github.com/gohugoio/hugo/releases/download/v0.53/hugo_extended_0.53_Linux-64bit.tar.gz && \
+    tar -zxvf /tmp/hugo/hugo.tar.gz -C /tmp/hugo/ && \
+    mv /tmp/hugo/hugo /usr/local/bin/ && \
+    rm -r /tmp/hugo
+
+RUN curl -sL https://deb.nodesource.com/setup_11.x | bash - && \
+    apt-get install -y nodejs
 
 # make sure we keep the path to go
 RUN echo "export PATH=/usr/local/go/bin:/go/bin/:\$PATH" >> /root/.bashrc

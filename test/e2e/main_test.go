@@ -33,8 +33,8 @@ func TestMain(m *testing.M) {
 	usr, _ := user.Current()
 	kubeconfig := flag.String("kubeconfig", filepath.Join(usr.HomeDir, "/.kube/config"),
 		"kube config path, e.g. $HOME/.kube/config")
-	gsimage := flag.String("gameserver-image", "gcr.io/agones-images/udp-server:0.5",
-		"gameserver image to use for those tests, gcr.io/agones-images/udp-server:0.5")
+	gsimage := flag.String("gameserver-image", "gcr.io/agones-images/udp-server:0.6",
+		"gameserver image to use for those tests, gcr.io/agones-images/udp-server:0.6")
 	pullSecret := flag.String("pullsecret", "",
 		"optional secret to be used for pulling the gameserver and/or Agones SDK sidecar images")
 
@@ -49,6 +49,13 @@ func TestMain(m *testing.M) {
 		log.Printf("failed to setup framework: %v\n", err)
 		os.Exit(1)
 	}
+
+	// run cleanup before tests, to ensure no resources from previous runs exist.
+	err = framework.CleanUp(defaultNs)
+	if err != nil {
+		log.Printf("failed to cleanup resources: %v\n", err)
+	}
+
 	defer func() {
 		err = framework.CleanUp(defaultNs)
 		if err != nil {

@@ -15,6 +15,7 @@
 package v1alpha1
 
 import (
+	"agones.dev/agones/pkg"
 	"agones.dev/agones/pkg/apis/stable"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +29,8 @@ const (
 )
 
 // +genclient
+// +genclient:method=GetScale,verb=get,subresource=scale,result=k8s.io/api/extensions/v1beta1.Scale
+// +genclient:method=UpdateScale,verb=update,subresource=scale,input=k8s.io/api/extensions/v1beta1.Scale,result=k8s.io/api/extensions/v1beta1.Scale
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
 // Fleet is the data structure for a Fleet resource
@@ -124,6 +127,11 @@ func (f *Fleet) ApplyDefaults() {
 			f.Spec.Strategy.RollingUpdate.MaxUnavailable = &def
 		}
 	}
+	// Add Agones version into Fleet Annotations
+	if f.ObjectMeta.Annotations == nil {
+		f.ObjectMeta.Annotations = make(map[string]string, 1)
+	}
+	f.ObjectMeta.Annotations[stable.VersionAnnotation] = pkg.Version
 }
 
 // UpperBoundReplicas returns whichever is smaller,

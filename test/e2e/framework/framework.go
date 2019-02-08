@@ -19,6 +19,7 @@ package framework
 import (
 	"fmt"
 	"net"
+	"testing"
 	"time"
 
 	"agones.dev/agones/pkg/apis/stable/v1alpha1"
@@ -33,6 +34,12 @@ import (
 	// required to use gcloud login see: https://github.com/kubernetes/client-go/issues/242
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/tools/clientcmd"
+)
+
+// special labels that can be put on pods to trigger automatic cleanup.
+const (
+	AutoCleanupLabelKey   = "stable.agones.dev/e2e-test-auto-cleanup"
+	AutoCleanupLabelValue = "true"
 )
 
 // Framework is a testing framework
@@ -116,8 +123,10 @@ func (f *Framework) WaitForGameServerState(gs *v1alpha1.GameServer, state v1alph
 	return readyGs, nil
 }
 
-// WaitForFleetCondition waits for the Fleet to be in a specific condition
-func (f *Framework) WaitForFleetCondition(flt *v1alpha1.Fleet, condition func(fleet *v1alpha1.Fleet) bool) error {
+// WaitForFleetCondition waits for the Fleet to be in a specific condition or fails the test if the condition can't be met in 5 minutes.
+func (f *Framework) WaitForFleetCondition(t *testing.T, flt *v1alpha1.Fleet, condition func(fleet *v1alpha1.Fleet) bool) {
+	t.Helper()
+	logrus.WithField("fleet", flt.Name).Info("waiting for fleet condition")
 	err := wait.PollImmediate(2*time.Second, 5*time.Minute, func() (bool, error) {
 		fleet, err := f.AgonesClient.StableV1alpha1().Fleets(flt.ObjectMeta.Namespace).Get(flt.ObjectMeta.Name, metav1.GetOptions{})
 		if err != nil {
@@ -126,7 +135,10 @@ func (f *Framework) WaitForFleetCondition(flt *v1alpha1.Fleet, condition func(fl
 
 		return condition(fleet), nil
 	})
-	return err
+	if err != nil {
+		logrus.WithField("fleet", flt.Name).WithError(err).Info("error waiting for fleet condition")
+		t.Fatal("error waiting for fleet condition")
+	}
 }
 
 // ListGameServersFromFleet lists GameServers from a particular fleet
@@ -155,6 +167,7 @@ func (f *Framework) ListGameServersFromFleet(flt *v1alpha1.Fleet) ([]v1alpha1.Ga
 // FleetReadyCount returns the ready count in a fleet
 func FleetReadyCount(amount int32) func(fleet *v1alpha1.Fleet) bool {
 	return func(fleet *v1alpha1.Fleet) bool {
+		logrus.Infof("fleet %v has %v/%v ready replicas", fleet.Name, fleet.Status.ReadyReplicas, amount)
 		return fleet.Status.ReadyReplicas == amount
 	}
 }
@@ -186,26 +199,51 @@ func (f *Framework) WaitForFleetGameServersCondition(flt *v1alpha1.Fleet, cond f
 	})
 }
 
-// CleanUp Delete all Agones resources in a given namespace
+// CleanUp Delete all Agones resources in a given namespace.
 func (f *Framework) CleanUp(ns string) error {
-	logrus.Info("Done. Cleaning up now.")
-	err := f.AgonesClient.StableV1alpha1().Fleets(ns).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{})
+	logrus.Info("Cleaning up now.")
+	defer logrus.Info("Finished cleanup.")
+	alpha1 := f.AgonesClient.StableV1alpha1()
+	deleteOptions := &metav1.DeleteOptions{}
+	listOptions := metav1.ListOptions{}
+
+	// find and delete pods created by tests and labeled with our special label
+	pods := f.KubeClient.CoreV1().Pods(ns)
+	podList, err := pods.List(metav1.ListOptions{
+		LabelSelector: AutoCleanupLabelKey + "=" + AutoCleanupLabelValue,
+	})
 	if err != nil {
 		return err
 	}
 
-	err = f.AgonesClient.StableV1alpha1().GameServerAllocations(ns).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{})
+	for _, p := range podList.Items {
+		if err = pods.Delete(p.ObjectMeta.Name, deleteOptions); err != nil {
+			return err
+		}
+	}
+
+	err = alpha1.Fleets(ns).DeleteCollection(deleteOptions, listOptions)
 	if err != nil {
 		return err
 	}
 
-	err = f.AgonesClient.StableV1alpha1().FleetAllocations(ns).DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{})
+	err = alpha1.GameServerAllocations(ns).DeleteCollection(deleteOptions, listOptions)
 	if err != nil {
 		return err
 	}
 
-	return f.AgonesClient.StableV1alpha1().GameServers(ns).
-		DeleteCollection(&metav1.DeleteOptions{}, metav1.ListOptions{})
+	err = alpha1.FleetAllocations(ns).DeleteCollection(deleteOptions, listOptions)
+	if err != nil {
+		return err
+	}
+
+	err = alpha1.FleetAutoscalers(ns).DeleteCollection(deleteOptions, listOptions)
+	if err != nil {
+		return err
+	}
+
+	return alpha1.GameServers(ns).
+		DeleteCollection(deleteOptions, listOptions)
 }
 
 // PingGameServer pings a gameserver and returns its reply

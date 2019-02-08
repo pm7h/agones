@@ -20,6 +20,7 @@ import (
 
 	"github.com/mattbaird/jsonpatch"
 
+	"agones.dev/agones/pkg"
 	"agones.dev/agones/pkg/apis/stable"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
@@ -332,10 +333,10 @@ func (gs *GameServer) Pod(sidecars ...corev1.Container) (*corev1.Pod, error) {
 
 // podObjectMeta configures the pod ObjectMeta details
 func (gs *GameServer) podObjectMeta(pod *corev1.Pod) {
-	// Switch to GenerateName, so that we always get a Unique name for the Pod, and there
-	// can be no collisions
-	pod.ObjectMeta.GenerateName = gs.ObjectMeta.Name + "-"
-	pod.ObjectMeta.Name = ""
+	pod.ObjectMeta.GenerateName = ""
+	// Pods inherit the name of their gameserver. It's safe since there's
+	// a guarantee that pod won't outlive its parent.
+	pod.ObjectMeta.Name = gs.ObjectMeta.Name
 	// Pods for GameServers need to stay in the same namespace
 	pod.ObjectMeta.Namespace = gs.ObjectMeta.Namespace
 	// Make sure these are blank, just in case
@@ -360,6 +361,15 @@ func (gs *GameServer) podObjectMeta(pod *corev1.Pod) {
 		// (and evict the Pod in the process)
 		pod.ObjectMeta.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] = "false"
 	}
+
+	// Add Agones version into Pod Annotations
+	pod.ObjectMeta.Annotations[stable.VersionAnnotation] = pkg.Version
+	if gs.ObjectMeta.Annotations == nil {
+		gs.ObjectMeta.Annotations = make(map[string]string, 1)
+	}
+	// VersionAnnotation is the annotation that stores
+	// the version of sdk which runs in a sidecar
+	gs.ObjectMeta.Annotations[stable.VersionAnnotation] = pkg.Version
 }
 
 // podScheduling applies the Fleet scheduling strategy to the passed in Pod

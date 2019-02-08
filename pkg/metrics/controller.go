@@ -17,8 +17,12 @@ package metrics
 import (
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/client-go/listers/core/v1"
 
 	stablev1alpha1 "agones.dev/agones/pkg/apis/stable/v1alpha1"
 	"agones.dev/agones/pkg/client/clientset/versioned"
@@ -28,29 +32,35 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"go.opencensus.io/stats"
-	"go.opencensus.io/stats/view"
 	"go.opencensus.io/tag"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 )
 
 var (
 	// MetricResyncPeriod is the interval to re-synchronize metrics based on indexed cache.
-	MetricResyncPeriod = time.Second * 1
+	MetricResyncPeriod = time.Second * 15
 )
 
-// Controller is a metrics controller
+func init() {
+	registerViews()
+}
+
+// Controller is a metrics controller collecting Agones state metrics
 type Controller struct {
 	logger           *logrus.Entry
 	gameServerLister listerv1alpha1.GameServerLister
 	faLister         listerv1alpha1.FleetAllocationLister
+	nodeLister       v1.NodeLister
 	gameServerSynced cache.InformerSynced
 	fleetSynced      cache.InformerSynced
 	fasSynced        cache.InformerSynced
 	faSynced         cache.InformerSynced
+	nodeSynced       cache.InformerSynced
 	lock             sync.Mutex
 	gsCount          GameServerCount
 	faCount          map[string]int64
@@ -60,6 +70,7 @@ type Controller struct {
 func NewController(
 	kubeClient kubernetes.Interface,
 	agonesClient versioned.Interface,
+	kubeInformerFactory informers.SharedInformerFactory,
 	agonesInformerFactory externalversions.SharedInformerFactory) *Controller {
 
 	gameServer := agonesInformerFactory.Stable().V1alpha1().GameServers()
@@ -71,14 +82,18 @@ func NewController(
 	fInformer := fleets.Informer()
 	fas := agonesInformerFactory.Stable().V1alpha1().FleetAutoscalers()
 	fasInformer := fas.Informer()
+	node := kubeInformerFactory.Core().V1().Nodes()
+	nodeInformer := node.Informer()
 
 	c := &Controller{
 		gameServerLister: gameServer.Lister(),
-		gameServerSynced: gsInformer.HasSynced,
+		nodeLister:       node.Lister(),
 		faLister:         fa.Lister(),
+		gameServerSynced: gsInformer.HasSynced,
 		fleetSynced:      fInformer.HasSynced,
 		fasSynced:        fasInformer.HasSynced,
 		faSynced:         faInformer.HasSynced,
+		nodeSynced:       nodeInformer.HasSynced,
 		gsCount:          GameServerCount{},
 		faCount:          map[string]int64{},
 	}
@@ -109,24 +124,7 @@ func NewController(
 		UpdateFunc: c.recordGameServerStatusChanges,
 	}, 0)
 
-	c.registerViews()
 	return c
-}
-
-// register all our views to OpenCensus
-func (c *Controller) registerViews() {
-	for _, v := range views {
-		if err := view.Register(v); err != nil {
-			c.logger.WithError(err).Error("could not register view")
-		}
-	}
-}
-
-// unregister views, this is only useful for tests as it trigger reporting.
-func (c *Controller) unRegisterViews() {
-	for _, v := range views {
-		view.Unregister(v)
-	}
 }
 
 func (c *Controller) recordFleetAutoScalerChanges(old, new interface{}) {
@@ -172,9 +170,9 @@ func (c *Controller) recordFleetAutoScalerChanges(old, new interface{}) {
 	// recording buffer policy
 	if fas.Spec.Policy.Buffer != nil {
 		// recording limits
-		c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "max")},
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "max")},
 			fasBufferLimitsCountStats.M(int64(fas.Spec.Policy.Buffer.MaxReplicas)))
-		c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "min")},
+		recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "min")},
 			fasBufferLimitsCountStats.M(int64(fas.Spec.Policy.Buffer.MinReplicas)))
 
 		// recording size
@@ -183,13 +181,13 @@ func (c *Controller) recordFleetAutoScalerChanges(old, new interface{}) {
 			sizeString := fas.Spec.Policy.Buffer.BufferSize.StrVal
 			if sizeString != "" {
 				if size, err := strconv.Atoi(sizeString[:len(sizeString)-1]); err == nil {
-					c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "percentage")},
+					recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "percentage")},
 						fasBufferSizeStats.M(int64(size)))
 				}
 			}
 		} else {
 			// as count
-			c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "count")},
+			recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "count")},
 				fasBufferSizeStats.M(int64(fas.Spec.Policy.Buffer.BufferSize.IntVal)))
 		}
 	}
@@ -240,20 +238,14 @@ func (c *Controller) recordFleetReplicas(fleetName string, total, allocated, rea
 
 	ctx, _ := tag.New(context.Background(), tag.Upsert(keyName, fleetName))
 
-	c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total")},
+	recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "total")},
 		fleetsReplicasCountStats.M(int64(total)))
-	c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated")},
+	recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "allocated")},
 		fleetsReplicasCountStats.M(int64(allocated)))
-	c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "ready")},
+	recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "ready")},
 		fleetsReplicasCountStats.M(int64(ready)))
-	c.recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "desired")},
+	recordWithTags(ctx, []tag.Mutator{tag.Upsert(keyType, "desired")},
 		fleetsReplicasCountStats.M(int64(desired)))
-}
-
-func (c *Controller) recordWithTags(ctx context.Context, mutators []tag.Mutator, ms ...stats.Measurement) {
-	if err := stats.RecordWithTags(ctx, mutators, ms...); err != nil {
-		c.logger.WithError(err).Warn("error while recoding stats")
-	}
 }
 
 // recordGameServerStatusChanged records gameserver status changes, however since it's based
@@ -278,7 +270,7 @@ func (c *Controller) recordGameServerStatusChanges(old, new interface{}) {
 		if fleetName == "" {
 			fleetName = "none"
 		}
-		c.recordWithTags(context.Background(), []tag.Mutator{tag.Upsert(keyType, string(newGs.Status.State)),
+		recordWithTags(context.Background(), []tag.Mutator{tag.Upsert(keyType, string(newGs.Status.State)),
 			tag.Upsert(keyFleetName, fleetName)}, gameServerTotalStats.M(1))
 	}
 }
@@ -296,7 +288,7 @@ func (c *Controller) recordFleetAllocationChanges(old, new interface{}) {
 	// fleet allocations are added without gameserver allocated
 	// but then get modified on successful allocation with their gameserver
 	if oldFa.Status.GameServer == nil && newFa.Status.GameServer != nil {
-		c.recordWithTags(context.Background(), []tag.Mutator{tag.Upsert(keyFleetName, newFa.Spec.FleetName)},
+		recordWithTags(context.Background(), []tag.Mutator{tag.Upsert(keyFleetName, newFa.Spec.FleetName)},
 			fleetAllocationTotalStats.M(1))
 	}
 }
@@ -320,6 +312,7 @@ func (c *Controller) collect() {
 	defer c.lock.Unlock()
 	c.collectGameServerCounts()
 	c.collectFleetAllocationCounts()
+	c.collectNodeCounts()
 }
 
 // collects fleet allocations count by going through our informer cache
@@ -332,6 +325,7 @@ func (c *Controller) collectFleetAllocationCounts() {
 	fleetAllocations, err := c.faLister.List(labels.Everything())
 	if err != nil {
 		c.logger.WithError(err).Warn("failed listing fleet allocations")
+		return
 	}
 
 	for _, fa := range fleetAllocations {
@@ -339,7 +333,7 @@ func (c *Controller) collectFleetAllocationCounts() {
 	}
 
 	for fleetName, count := range c.faCount {
-		c.recordWithTags(context.Background(), []tag.Mutator{tag.Insert(keyFleetName, fleetName)},
+		recordWithTags(context.Background(), []tag.Mutator{tag.Insert(keyFleetName, fleetName)},
 			fleetAllocationCountStats.M(count))
 	}
 }
@@ -351,9 +345,66 @@ func (c *Controller) collectGameServerCounts() {
 	gameservers, err := c.gameServerLister.List(labels.Everything())
 	if err != nil {
 		c.logger.WithError(err).Warn("failed listing gameservers")
+		return
 	}
 
 	if err := c.gsCount.record(gameservers); err != nil {
 		c.logger.WithError(err).Warn("error while recoding stats")
 	}
+}
+
+// collectNodeCounts count gameservers per node using informer cache.
+func (c *Controller) collectNodeCounts() {
+	gsPerNodes := map[string]int32{}
+
+	gameservers, err := c.gameServerLister.List(labels.Everything())
+	if err != nil {
+		c.logger.WithError(err).Warn("failed listing gameservers")
+		return
+	}
+	for _, gs := range gameservers {
+		if gs.Status.NodeName != "" {
+			gsPerNodes[gs.Status.NodeName]++
+		}
+	}
+
+	nodes, err := c.nodeLister.List(labels.Everything())
+	if err != nil {
+		c.logger.WithError(err).Warn("failed listing gameservers")
+		return
+	}
+
+	nodes = removeSystemNodes(nodes)
+	recordWithTags(context.Background(), []tag.Mutator{tag.Insert(keyEmpty, "true")},
+		nodesCountStats.M(int64(len(nodes)-len(gsPerNodes))))
+	recordWithTags(context.Background(), []tag.Mutator{tag.Insert(keyEmpty, "false")},
+		nodesCountStats.M(int64(len(gsPerNodes))))
+
+	for _, node := range nodes {
+		stats.Record(context.Background(), gsPerNodesCountStats.M(int64(gsPerNodes[node.Name])))
+	}
+
+}
+
+func removeSystemNodes(nodes []*corev1.Node) []*corev1.Node {
+	var result []*corev1.Node
+
+	for _, n := range nodes {
+		if !isSystemNode(n) {
+			result = append(result, n)
+		}
+	}
+
+	return result
+}
+
+// isSystemNode determines if a node is a system node, by checking if it has any taints starting with "stable.agones.dev/"
+func isSystemNode(n *corev1.Node) bool {
+	for _, t := range n.Spec.Taints {
+		if strings.HasPrefix(t.Key, "stable.agones.dev/") {
+			return true
+		}
+	}
+
+	return false
 }

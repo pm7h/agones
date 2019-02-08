@@ -81,10 +81,10 @@ func TestControllerSyncGameServer(t *testing.T) {
 			pod := ca.GetObject().(*corev1.Pod)
 			pod.Spec.NodeName = node.ObjectMeta.Name
 			podCreated = true
-			assert.Equal(t, fixture.ObjectMeta.Name+"-", pod.ObjectMeta.GenerateName)
+			assert.Equal(t, fixture.ObjectMeta.Name, pod.ObjectMeta.Name)
 			watchPods.Add(pod)
 			// wait for the change to propagate
-			assert.True(t, cache.WaitForCacheSync(context.Background().Done(), mocks.KubeInformationFactory.Core().V1().Pods().Informer().HasSynced))
+			assert.True(t, cache.WaitForCacheSync(context.Background().Done(), mocks.KubeInformerFactory.Core().V1().Pods().Informer().HasSynced))
 			return true, pod, nil
 		})
 		mocks.AgonesClient.AddReactor("list", "gameservers", func(action k8stesting.Action) (bool, runtime.Object, error) {
@@ -172,11 +172,15 @@ func TestControllerWatchGameServers(t *testing.T) {
 	received := make(chan string)
 	defer close(received)
 
-	c.workerqueue.SyncHandler = func(name string) error {
+	h := func(name string) error {
 		assert.Equal(t, "default/test", name)
 		received <- name
 		return nil
 	}
+
+	c.workerqueue.SyncHandler = h
+	c.creationWorkerQueue.SyncHandler = h
+	c.deletionWorkerQueue.SyncHandler = h
 
 	stop, cancel := agtesting.StartInformers(m, c.gameServerSynced)
 	defer cancel()
@@ -190,7 +194,7 @@ func TestControllerWatchGameServers(t *testing.T) {
 		}
 	}
 
-	podSynced := m.KubeInformationFactory.Core().V1().Pods().Informer().HasSynced
+	podSynced := m.KubeInformerFactory.Core().V1().Pods().Informer().HasSynced
 	gsSynced := m.AgonesInformerFactory.Stable().V1alpha1().GameServers().Informer().HasSynced
 
 	go func() {
@@ -690,7 +694,7 @@ func TestControllerCreateGameServerPod(t *testing.T) {
 			ca := action.(k8stesting.CreateAction)
 			pod := ca.GetObject().(*corev1.Pod)
 
-			assert.Equal(t, fixture.ObjectMeta.Name+"-", pod.ObjectMeta.GenerateName)
+			assert.Equal(t, fixture.ObjectMeta.Name, pod.ObjectMeta.Name)
 			assert.Equal(t, fixture.ObjectMeta.Namespace, pod.ObjectMeta.Namespace)
 			assert.Equal(t, "gameserver", pod.ObjectMeta.Labels[stable.GroupName+"/role"])
 			assert.Equal(t, fixture.ObjectMeta.Name, pod.ObjectMeta.Labels[v1alpha1.GameServerPodLabel])
@@ -952,7 +956,7 @@ func TestControllerAddress(t *testing.T) {
 				return true, &corev1.NodeList{Items: []corev1.Node{fixture.node}}, nil
 			})
 
-			v1 := mocks.KubeInformationFactory.Core().V1()
+			v1 := mocks.KubeInformerFactory.Core().V1()
 			nodeSynced := v1.Nodes().Informer().HasSynced
 			podSynced := v1.Pods().Informer().HasSynced
 			_, cancel := agtesting.StartInformers(mocks, c.gameServerSynced, podSynced, nodeSynced)
@@ -1102,7 +1106,7 @@ func newFakeController() (*Controller, agtesting.Mocks) {
 	wh := webhooks.NewWebHook("", "")
 	c := NewController(wh, healthcheck.NewHandler(), &sync.Mutex{},
 		10, 20, "sidecar:dev", false,
-		resource.MustParse("0.05"), resource.MustParse("0.1"), m.KubeClient, m.KubeInformationFactory, m.ExtClient, m.AgonesClient, m.AgonesInformerFactory)
+		resource.MustParse("0.05"), resource.MustParse("0.1"), m.KubeClient, m.KubeInformerFactory, m.ExtClient, m.AgonesClient, m.AgonesInformerFactory)
 	c.recorder = m.FakeRecorder
 	return c, m
 }

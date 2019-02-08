@@ -53,13 +53,13 @@ KIND_PROFILE ?= agones
 KIND_CONTAINER_NAME=kind-$(KIND_PROFILE)-control-plane
 
 # Game Server image to use while doing end-to-end tests
-GS_TEST_IMAGE ?= gcr.io/agones-images/udp-server:0.5
+GS_TEST_IMAGE ?= gcr.io/agones-images/udp-server:0.6
 
 # Directory that this Makefile is in.
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
 build_path := $(dir $(mkfile_path))
 agones_path := $(realpath $(build_path)/..)
-docs_path := $(agones_path)/docs
+site_path := $(agones_path)/site
 
 kubeconfig_path := $(dir $(KUBECONFIG))
 kubeconfig_file := $(notdir $(KUBECONFIG))
@@ -121,6 +121,46 @@ ifndef FULL_BUILD
 	zip_flags = -0
 endif
 
+GO_BUILD_LINUX_AMD64=docker run --rm -e "CGO_ENABLED=0" $(common_mounts) $(build_tag) go build
+GO_BUILD_DARWIN_AMD64=docker run --rm -e "GOOS=darwin" -e "GOARCH=amd64" $(common_mounts) $(build_tag) go build
+GO_BUILD_WINDOWS_AMD64=docker run --rm -e "GOOS=windows" -e "GOARCH=amd64" $(common_mounts) $(build_tag) go build
+
+RACE_DETECTOR_ARGS=-race
+
+ifdef NO_RACE_DETECTOR
+  RACE_DETECTOR_ARGS=
+endif
+
+GO_TEST=$(DOCKER_RUN) go test -v $(RACE_DETECTOR_ARGS)
+GO_E2E_TEST_ARGS=--kubeconfig /root/.kube/$(kubeconfig_file)
+
+go_build_base_path=$(mount_path)
+
+ifdef LOCAL_GO
+	# use local Go tooling, which greatly speeds up incremental rebuils, in particular on macOS
+	# Note that agones.dev must be in GOPATH
+	GO_BUILD_LINUX_AMD64=CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build
+	GO_BUILD_WINDOWS_AMD64=GOOS=linux GOARCH=amd64 go build
+	GO_BUILD_DARWIN_AMD64=GOOS=darwin GOARCH=amd64 go build
+	GO_TEST=go test -v $(RACE_DETECTOR_ARGS)
+	GO_E2E_TEST_ARGS=
+	go_build_base_path=$(agones_path)
+endif
+
+ZIP_SDK=docker run --rm $(common_mounts) -w $(mount_path)/cmd/sdk-server/bin/ $(build_tag) zip $(zip_flags)
+ifdef LOCAL_ZIP
+	ZIP_SDK=cd $(agones_path)/cmd/sdk-server/bin && zip -0
+endif
+
+#   ___            _           _
+#  |_ _|_ __   ___| |_   _  __| | ___ ___
+#   | || '_ \ / __| | | | |/ _` |/ _ \ __|
+#   | || | | | (__| | |_| | (_| |  __\__ \
+#  |___|_| |_|\___|_|\__,_|\__,_|\___|___/
+#
+
+include ./includes/website.mk
+
 #   _____                    _
 #  |_   _|_ _ _ __ __ _  ___| |_ ___
 #    | |/ _` | '__/ _` |/ _ \ __/ __|
@@ -163,18 +203,17 @@ push-release-chart: $(ensure-build-image)
 build-sdks: build-sdk-cpp
 
 # Run all tests
-test: $(ensure-build-image) test-go test-install-yaml
+test: $(ensure-build-image) test-go test-install-yaml site-test
 
 # Run go tests
 test-go:
-	docker run --rm $(common_mounts) $(build_tag) go test -race $(agones_package)/pkg/... \
-	$(agones_package)/sdks/... $(agones_package)/cmd/...
+	$(GO_TEST) $(agones_package)/pkg/... \
+	    $(agones_package)/sdks/... $(agones_package)/cmd/...
 
 # Runs end-to-end tests on the current configured cluster
 # For minikube user the minikube-test-e2e targets
 test-e2e: $(ensure-build-image)
-	$(DOCKER_RUN) go test -v -race $(agones_package)/test/e2e/... \
-		--kubeconfig /root/.kube/$(kubeconfig_file) \
+	$(GO_TEST) $(agones_package)/test/e2e $(ARGS) $(GO_E2E_TEST_ARGS) \
 		--gameserver-image=$(GS_TEST_IMAGE) \
 		--pullsecret=$(IMAGE_PULL_SECRET)
 
@@ -213,8 +252,8 @@ uninstall: $(ensure-build-image)
 
 # Build a static binary for the gameserver controller
 build-controller-binary: $(ensure-build-image)
-	docker run --rm -e "CGO_ENABLED=0" $(common_mounts) $(build_tag) go build \
-	-tags $(GO_BUILD_TAGS) -o $(mount_path)/cmd/controller/bin/controller \
+	$(GO_BUILD_LINUX_AMD64) \
+	-tags $(GO_BUILD_TAGS) -o $(go_build_base_path)/cmd/controller/bin/controller \
 	$(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/controller
 
 # Lint the go source code.
@@ -234,23 +273,23 @@ push-controller-image: $(ensure-build-image)
 
 # build the static binary for the gamesever sidecar
 build-agones-sdk-binary: $(ensure-build-image) build-agones-sdk-binary-linux build-agones-sdk-binary-windows build-agones-sdk-binary-darwin 
-	docker run --rm $(common_mounts) -w $(mount_path)/cmd/sdk-server/bin/ $(build_tag) zip $(zip_flags) \
+	$(ZIP_SDK) \
 		agonessdk-server-$(VERSION).zip sdk-server.darwin.amd64 sdk-server.linux.amd64 sdk-server.windows.amd64.exe
 
 # build the static binary for the gamesever sidecar for Linux
 build-agones-sdk-binary-linux: $(ensure-build-image)
-	docker run --rm -e "CGO_ENABLED=0" $(common_mounts) $(build_tag) go build \
-		-o $(mount_path)/cmd/sdk-server/bin/sdk-server.linux.amd64 $(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/sdk-server
+	$(GO_BUILD_LINUX_AMD64) \
+		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.linux.amd64 $(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/sdk-server
 
 # build the static binary for the gamesever sidecar for Darwin (macOS)
 build-agones-sdk-binary-darwin: $(ensure-build-image)
-	docker run --rm -e "GOOS=darwin" -e "GOARCH=amd64" $(common_mounts) $(build_tag) go build \
-		-o $(mount_path)/cmd/sdk-server/bin/sdk-server.darwin.amd64 $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
+	$(GO_BUILD_DARWIN_AMD64) \
+		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.darwin.amd64 $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
 
 # build the windows binary for the gamesever sidecar for Windows
 build-agones-sdk-binary-windows: $(ensure-build-image)
-	docker run --rm -e "GOOS=windows" -e "GOARCH=amd64" $(common_mounts) $(build_tag) go build \
-		-o $(mount_path)/cmd/sdk-server/bin/sdk-server.windows.amd64.exe $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
+	$(GO_BUILD_WINDOWS_AMD64) \
+		-o $(go_build_base_path)/cmd/sdk-server/bin/sdk-server.windows.amd64.exe $(go_rebuild_flags) $(go_version_flags) $(agones_package)/cmd/sdk-server
 
 # Build the image for the gameserver sidecar
 build-agones-sdk-image: $(ensure-build-image) build-agones-sdk-binary
@@ -258,8 +297,8 @@ build-agones-sdk-image: $(ensure-build-image) build-agones-sdk-binary
 
 # Build a static binary for the ping service
 build-ping-binary: $(ensure-build-image)
-	docker run --rm -e "CGO_ENABLED=0" $(common_mounts) $(build_tag) go build \
-	-tags $(GO_BUILD_TAGS) -o $(mount_path)/cmd/ping/bin/ping \
+	$(GO_BUILD_LINUX_AMD64) \
+	-tags $(GO_BUILD_TAGS) -o $(go_build_base_path)/cmd/ping/bin/ping \
 	$(go_rebuild_flags) $(go_version_flags) -installsuffix cgo $(agones_package)/cmd/ping
 
 # Pushes up the ping image
@@ -297,11 +336,17 @@ gen-crd-client: $(ensure-build-image)
 	docker run --rm $(common_mounts) -w $(mount_path) $(build_tag) /root/gen-crd-client.sh
 	docker run --rm $(common_mounts) -w $(mount_path)/pkg $(build_tag) goimports -w .
 
-doc-images: $(docs_path)/gameserver-states.png
+site-images: $(site_path)/static/diagrams/gameserver-states.dot.png $(site_path)/static/diagrams/gameserver-lifecycle.puml.png
 
-%.png: %.dot
+# generate pngs from dot files
+%.dot.png: %.dot
 	docker run -i --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
 	  'dot -Tpng /dev/stdin' < $< > $@.tmp && mv $@.tmp $@
+
+# general pngs from puml files
+%.puml.png: %.puml
+	docker run -i --rm $(common_mounts) $(DOCKER_RUN_ARGS) $(build_tag) bash -c \
+		'plantuml -pipe' < $< > $@
 
 # Run a bash shell with the developer tools in it. (Creates the image if it doesn't exist)
 # Can use DOCKER_RUN_ARGS for extra arguments.
@@ -360,23 +405,25 @@ pprof-web:
 
 # setup prometheus in the current cluster by default Persistent Volume Claims are requested.
 setup-prometheus: PVC ?= true
+setup-prometheus: PV_SIZE ?= 64Gi
+setup-prometheus: SCRAPE_INTERVAL=30s
 setup-prometheus:
 	$(DOCKER_RUN) \
 		helm upgrade --install --wait prom stable/prometheus --namespace metrics \
-		--set alertmanager.enabled=false,pushgateway.enabled=false \
-		--set kubeStateMetrics.enabled=false,nodeExporter.enabled=false \
-		--set pushgateway.enabled=false \
-		--set server.global.scrape_interval=30s,server.persistentVolume.enabled=$(PVC)
+		--set server.global.scrape_interval=$(SCRAPE_INTERVAL),server.persistentVolume.enabled=$(PVC),server.persistentVolume.size=$(PV_SIZE) \
+		$(HELM_ARGS) \
+		-f $(mount_path)/build/prometheus.yaml
 
 # setup grafana in the current cluster with datasource and dashboards ready for use with agones
 # by default Persistent Volume Claims are requested.
 setup-grafana: PVC ?= true
+setup-grafana: PV_SIZE ?= 64Gi
 setup-grafana: PASSWORD ?= admin
 setup-grafana:
 	$(DOCKER_RUN) kubectl apply -f $(mount_path)/build/grafana/
 	$(DOCKER_RUN) \
 		helm upgrade --install --wait grafana stable/grafana  --namespace metrics \
-		--set persistence.enabled=$(PVC) \
+		--set persistence.enabled=$(PVC),server.persistentVolume.size=$(PV_SIZE) \
 		--set adminPassword=$(PASSWORD) -f $(mount_path)/build/grafana.yaml
 
 # generate a changelog using github-changelog-generator
@@ -447,7 +494,7 @@ install-custom-pull-secret:
 gcloud-init: ensure-build-config
 	docker run --rm -it $(common_mounts) $(build_tag) gcloud init
 
-# Creates and authenticates a small, 3 node GKE cluster to work against
+# Creates and authenticates a small, 6 node GKE cluster to work against (2 nodes are used for agones-metrics and agones-system)
 gcloud-test-cluster: GCP_CLUSTER_LEGACYABAC ?= false
 gcloud-test-cluster: GCP_CLUSTER_NODEPOOL_INITIALNODECOUNT ?= 4
 gcloud-test-cluster: GCP_CLUSTER_NODEPOOL_MACHINETYPE ?= n1-standard-4
@@ -565,13 +612,15 @@ minikube-test-e2e: minikube-agones-profile test-e2e
 
 # prometheus on minkube 
 # we have to disable PVC as it's not supported on minkube.
-minkube-setup-prometheus:
+minikube-setup-prometheus:
 	$(MAKE) setup-prometheus \
-		DOCKER_RUN_ARGS="--network=host -v $(minikube_cert_mount)"
+		DOCKER_RUN_ARGS="--network=host -v $(minikube_cert_mount)" \
+		PVC=false HELM_ARGS="--set server.resources.requests.cpu=0,server.resources.requests.memory=0"
+
 
 # grafana on minkube with dashboards and prometheus datasource installed.
 # we have to disable PVC as it's not supported on minkube.
-minkube-setup-grafana:
+minikube-setup-grafana:
 	$(MAKE) setup-grafana \
 		DOCKER_RUN_ARGS="--network=host -v $(minikube_cert_mount)"
 
@@ -637,7 +686,6 @@ kind-push:
 
 # Runs e2e tests against our kind cluster
 kind-test-e2e: 
-kind-test-e2e: 
 	$(MAKE) KUBECONFIG="$(shell kind get kubeconfig-path --name="$(KIND_PROFILE)")" \
 		DOCKER_RUN_ARGS=--network=host \
 		test-e2e
@@ -647,7 +695,8 @@ kind-test-e2e:
 kind-setup-prometheus:
 	$(MAKE) setup-prometheus \
 		KUBECONFIG="$(shell kind get kubeconfig-path --name="$(KIND_PROFILE)")" \
-		DOCKER_RUN_ARGS="--network=host" PVC=false
+		DOCKER_RUN_ARGS="--network=host" PVC=false \
+		HELM_ARGS="--set server.resources.requests.cpu=0,server.resources.requests.memory=0"
 
 # grafana on kind with dashboards and prometheus datasource installed.
 # we have to disable PVC as it's not supported on kind.

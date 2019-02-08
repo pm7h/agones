@@ -13,7 +13,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -144,6 +143,7 @@ roleRef:
   kind: ClusterRole
   name: agones-sdk
 ---
+
 ---
 # Source: agones/templates/crds/fleet.yaml
 # Copyright 2018 Google Inc. All Rights Reserved.
@@ -327,6 +327,16 @@ spec:
                           type: integer
                           minimum: 1
                           maximum: 2147483648
+  subresources:
+    # scale enables the scale subresource.
+    scale:
+      # specReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Spec.Replicas.
+      specReplicasPath: .spec.replicas
+      # statusReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Replicas.
+      statusReplicasPath: .status.replicas
+      # labelSelectorPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Selector.
+      labelSelectorPath: .status.labelSelector
+
 ---
 # Source: agones/templates/crds/fleetallocation.yaml
 # Copyright 2018 Google Inc. All Rights Reserved.
@@ -647,7 +657,6 @@ spec:
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
 metadata:
@@ -747,7 +756,6 @@ spec:
                 - Distributed
             metadata:
               type: object
-
 
 
 ---
@@ -927,6 +935,16 @@ spec:
                           type: integer
                           minimum: 1
                           maximum: 2147483648
+  subresources:
+    # scale enables the scale subresource.
+    scale:
+      # specReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Spec.Replicas.
+      specReplicasPath: .spec.replicas
+      # statusReplicasPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Replicas.
+      statusReplicasPath: .status.replicas
+      # labelSelectorPath defines the JSONPath inside of a custom resource that corresponds to Scale.Status.Selector.
+      labelSelectorPath: .status.labelSelector
+
 ---
 # Source: agones/templates/service.yaml
 # Copyright 2018 Google Inc. All Rights Reserved.
@@ -1013,6 +1031,22 @@ spec:
         release: agones-manual
         heritage: Tiller
     spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: stable.agones.dev/agones-system
+                operator: Exists
+            weight: 1
+        
+      tolerations:
+        - effect: NoExecute
+          key: stable.agones.dev/agones-system
+          operator: Equal
+          value: "true"
+        
+      priorityClassName: agones-system
       serviceAccountName: agones-controller
       containers:
       - name: agones-controller
@@ -1031,10 +1065,20 @@ spec:
           value: "false"
         - name: SIDECAR_CPU_REQUEST
           value: "30m"
-        - name: METRICS
+        - name: PROMETHEUS_EXPORTER
           value: "true"
+        - name: STACKDRIVER_EXPORTER
+          value: "false"
+        - name: GCP_PROJECT_ID
+          value: ""
         - name: SIDECAR_CPU_LIMIT
           value: "0"
+        - name: NUM_WORKERS
+          value: "100"
+        - name: API_SERVER_QPS
+          value: "400"
+        - name: API_SERVER_QPS_BURST
+          value: "500"
         livenessProbe:
           httpGet:
             path: /live
@@ -1094,6 +1138,22 @@ spec:
         release: agones-manual
         heritage: Tiller
     spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: stable.agones.dev/agones-system
+                operator: Exists
+            weight: 1
+        
+      tolerations:
+        - effect: NoExecute
+          key: stable.agones.dev/agones-system
+          operator: Equal
+          value: "true"
+        
+      priorityClassName: agones-system
       containers:
         - name: agones-ping
           image: "gcr.io/agones-images/agones-ping:0.8.0-rc"
@@ -1153,6 +1213,16 @@ spec:
       targetPort: 8080
       protocol: UDP
   type: LoadBalancer
+---
+# Source: agones/templates/priority-class.yaml
+apiVersion: scheduling.k8s.io/v1beta1
+kind: PriorityClass
+metadata:
+  name: agones-system
+value: 1000000
+globalDefault: false
+description: "This priority class should be used for Agones service pods only."
+
 ---
 # Source: agones/templates/hooks/pre_delete_hook.yaml
 

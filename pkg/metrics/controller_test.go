@@ -34,7 +34,7 @@ func TestControllerGameServerCount(t *testing.T) {
 	c := newFakeController()
 	defer c.close()
 
-	gs1 := gameServer("test-fleet", v1alpha1.GameServerStateCreating)
+	gs1 := gameServerWithFleetAndState("test-fleet", v1alpha1.GameServerStateCreating)
 	c.gsWatch.Add(gs1)
 	gs1 = gs1.DeepCopy()
 	gs1.Status.State = v1alpha1.GameServerStateReady
@@ -42,17 +42,17 @@ func TestControllerGameServerCount(t *testing.T) {
 
 	c.sync()
 	c.collect()
-	c.report()
+	report()
 
 	gs1 = gs1.DeepCopy()
 	gs1.Status.State = v1alpha1.GameServerStateShutdown
 	c.gsWatch.Modify(gs1)
-	c.gsWatch.Add(gameServer("", v1alpha1.GameServerStatePortAllocation))
-	c.gsWatch.Add(gameServer("", v1alpha1.GameServerStatePortAllocation))
+	c.gsWatch.Add(gameServerWithFleetAndState("", v1alpha1.GameServerStatePortAllocation))
+	c.gsWatch.Add(gameServerWithFleetAndState("", v1alpha1.GameServerStatePortAllocation))
 
 	c.sync()
 	c.collect()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(gsCountExpected), "agones_gameservers_count"))
 }
@@ -74,7 +74,7 @@ func TestControllerFleetAllocationCount(t *testing.T) {
 
 	c.sync()
 	c.collect()
-	c.report()
+	report()
 
 	c.faWatch.Delete(fa1)
 	c.faWatch.Add(fleetAllocation("test-fleet"))
@@ -82,7 +82,7 @@ func TestControllerFleetAllocationCount(t *testing.T) {
 
 	c.sync()
 	c.collect()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(faCountExpected), "agones_fleet_allocations_count"))
 }
@@ -109,7 +109,7 @@ func TestControllerFleetAllocationTotal(t *testing.T) {
 		fa.Status.GameServer = nil
 		c.faWatch.Add(fa)
 		faUpdated := fa.DeepCopy()
-		faUpdated.Status.GameServer = gameServer("test", v1alpha1.GameServerStateAllocated)
+		faUpdated.Status.GameServer = gameServerWithFleetAndState("test", v1alpha1.GameServerStateAllocated)
 		c.faWatch.Modify(faUpdated)
 		// make sure we count only one event
 		c.faWatch.Modify(faUpdated)
@@ -119,11 +119,11 @@ func TestControllerFleetAllocationTotal(t *testing.T) {
 		fa.Status.GameServer = nil
 		c.faWatch.Add(fa)
 		faUpdated := fa.DeepCopy()
-		faUpdated.Status.GameServer = gameServer("test2", v1alpha1.GameServerStateAllocated)
+		faUpdated.Status.GameServer = gameServerWithFleetAndState("test2", v1alpha1.GameServerStateAllocated)
 		c.faWatch.Modify(faUpdated)
 	}
 	c.sync()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(faTotalExpected), "agones_fleet_allocations_total"))
 }
@@ -139,7 +139,7 @@ func TestControllerGameServersTotal(t *testing.T) {
 	c.run(t)
 
 	// deleted gs should not be counted
-	gs := gameServer("deleted", v1alpha1.GameServerStateCreating)
+	gs := gameServerWithFleetAndState("deleted", v1alpha1.GameServerStateCreating)
 	c.gsWatch.Add(gs)
 	c.gsWatch.Delete(gs)
 
@@ -153,7 +153,7 @@ func TestControllerGameServersTotal(t *testing.T) {
 	generateGsEvents(1, v1alpha1.GameServerStateUnhealthy, "", c.gsWatch)
 
 	c.sync()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(gsTotalExpected), "agones_gameservers_total"))
 }
@@ -179,7 +179,7 @@ func TestControllerFleetReplicasCount(t *testing.T) {
 	c.fleetWatch.Delete(fd)
 
 	c.sync()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(fleetReplicasCountExpected), "agones_fleets_replicas_count"))
 }
@@ -216,10 +216,34 @@ func TestControllerFleetAutoScalerState(t *testing.T) {
 	c.fasWatch.Delete(fasDeleted)
 
 	c.sync()
-	c.report()
+	report()
 
 	assert.Nil(t, testutil.GatherAndCompare(registry, strings.NewReader(fasStateExpected),
 		"agones_fleet_autoscalers_able_to_scale", "agones_fleet_autoscalers_buffer_limits", "agones_fleet_autoscalers_buffer_size",
 		"agones_fleet_autoscalers_current_replicas_count", "agones_fleet_autoscalers_desired_replicas_count", "agones_fleet_autoscalers_limited"))
 
+}
+
+func TestControllerGameServersNodeState(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	_, err := RegisterPrometheusExporter(registry)
+	assert.Nil(t, err)
+
+	c := newFakeController()
+	defer c.close()
+
+	c.nodeWatch.Add(nodeWithName("node1"))
+	c.nodeWatch.Add(nodeWithName("node2"))
+	c.nodeWatch.Add(nodeWithName("node3"))
+	c.gsWatch.Add(gameServerWithNode("node1"))
+	c.gsWatch.Add(gameServerWithNode("node2"))
+	c.gsWatch.Add(gameServerWithNode("node2"))
+
+	c.sync()
+	c.collect()
+	report()
+
+	if err := testutil.GatherAndCompare(registry, strings.NewReader(nodeCountExpected), "agones_nodes_count", "agones_gameservers_node_count"); err != nil {
+		t.Fatal(err)
+	}
 }
